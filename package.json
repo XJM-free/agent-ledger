@@ -1,0 +1,36 @@
+{
+  "name": "agent-ledger",
+  "version": "0.0.1",
+  "description": "See exactly where your Claude Code budget goes — per subagent, per task.",
+  "type": "module",
+  "bin": {
+    "agent-ledger": "./bin/agent-ledger.ts"
+  },
+  "scripts": {
+    "dev": "bun run bin/agent-ledger.ts",
+    "test": "bun test",
+    "build": "bun build bin/agent-ledger.ts --target=node --outdir dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "keywords": [
+    "claude-code",
+    "mcp",
+    "ai-agents",
+    "cost-tracking",
+    "observability",
+    "cli"
+  ],
+  "author": "Jie Xiang <jie.xiang.jm@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/XJM-free/agent-ledger.git"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
