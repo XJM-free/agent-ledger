@@ -30,6 +30,12 @@ const CACHE_5M_MULTIPLIER = 1.25;
 const CACHE_1H_MULTIPLIER = 2.0;
 const CACHE_READ_MULTIPLIER = 0.1;
 
+// Anthropic server-tool pricing (https://www.anthropic.com/pricing as of 2026-04):
+//   Web search: $10 per 1,000 requests = $0.01 / request
+//   Web fetch:  treated identically here pending Anthropic split (file an issue if wrong)
+const WEB_SEARCH_PRICE_PER_REQUEST = 0.01;
+const WEB_FETCH_PRICE_PER_REQUEST = 0.01;
+
 function resolveModel(model: ModelId | undefined): { input: number; output: number } {
 	if (!model) return { input: 0, output: 0 };
 	if (FREE_MODELS.has(model)) return { input: 0, output: 0 };
@@ -77,13 +83,26 @@ export function costFor(usage: TokenUsage, model: ModelId | undefined): CostBrea
 	const cacheCreation1hCost = perMillion(oneHour, rate.input * CACHE_1H_MULTIPLIER);
 	const cacheReadCost = perMillion(cacheRead, rate.input * CACHE_READ_MULTIPLIER);
 
+	const webSearchReqs = usage.server_tool_use?.web_search_requests ?? 0;
+	const webFetchReqs = usage.server_tool_use?.web_fetch_requests ?? 0;
+	const serverToolUseCost =
+		webSearchReqs * WEB_SEARCH_PRICE_PER_REQUEST +
+		webFetchReqs * WEB_FETCH_PRICE_PER_REQUEST;
+
 	return {
 		inputCost,
 		outputCost,
 		cacheCreation5mCost,
 		cacheCreation1hCost,
 		cacheReadCost,
-		totalCost: inputCost + outputCost + cacheCreation5mCost + cacheCreation1hCost + cacheReadCost,
+		serverToolUseCost,
+		totalCost:
+			inputCost +
+			outputCost +
+			cacheCreation5mCost +
+			cacheCreation1hCost +
+			cacheReadCost +
+			serverToolUseCost,
 	};
 }
 

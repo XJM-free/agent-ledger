@@ -107,4 +107,38 @@ describe('costFor()', () => {
 		expect(isKnownModel('something-entirely-unknown')).toBe(false);
 		expect(isKnownModel(undefined)).toBe(false);
 	});
+
+	test('server_tool_use: web_search at $0.01/req', () => {
+		const cost = costFor(
+			{
+				input_tokens: 0,
+				output_tokens: 0,
+				server_tool_use: { web_search_requests: 100 },
+			},
+			'claude-opus-4-7',
+		);
+		// 100 × $0.01 = $1.00
+		expect(cost.serverToolUseCost).toBeCloseTo(1.0, 6);
+		expect(cost.totalCost).toBeCloseTo(1.0, 6);
+	});
+
+	test('server_tool_use: web_fetch counted, summed with web_search', () => {
+		const cost = costFor(
+			{
+				input_tokens: 0,
+				output_tokens: 0,
+				server_tool_use: { web_search_requests: 50, web_fetch_requests: 50 },
+			},
+			'claude-opus-4-7',
+		);
+		expect(cost.serverToolUseCost).toBeCloseTo(1.0, 6);
+	});
+
+	test('server_tool_use absent → no cost', () => {
+		const cost = costFor(
+			{ input_tokens: 1000, output_tokens: 1000 },
+			'claude-opus-4-7',
+		);
+		expect(cost.serverToolUseCost).toBe(0);
+	});
 });

@@ -2,22 +2,28 @@ import { costFor } from './pricing.ts';
 import type { AggregatedRow, LedgerReport, SessionTurn } from './types.ts';
 
 const MAIN_AGENT_LABEL = '(main)';
+const UNKNOWN_MODEL_LABEL = '(no-model)';
 
-function emptyRow(subagent: string): AggregatedRow {
+export type GroupKey = 'subagent' | 'model' | 'day';
+
+function emptyRow(label: string): AggregatedRow {
 	return {
-		subagent,
+		subagent: label,
 		sessionCount: 0,
 		inputTokens: 0,
 		outputTokens: 0,
 		cacheCreation5mTokens: 0,
 		cacheCreation1hTokens: 0,
 		cacheReadTokens: 0,
+		webSearchRequests: 0,
+		webFetchRequests: 0,
 		cost: {
 			inputCost: 0,
 			outputCost: 0,
 			cacheCreation5mCost: 0,
 			cacheCreation1hCost: 0,
 			cacheReadCost: 0,
+			serverToolUseCost: 0,
 			totalCost: 0,
 		},
 	};
@@ -35,19 +41,32 @@ function splitCache(turn: SessionTurn): { fiveMin: number; oneHour: number } {
 	return { fiveMin: usage.cache_creation_input_tokens ?? 0, oneHour: 0 };
 }
 
+function keyOf(turn: SessionTurn, group: GroupKey): string {
+	if (group === 'model') return turn.model ?? UNKNOWN_MODEL_LABEL;
+	if (group === 'day') return turn.timestamp.slice(0, 10);
+	return turn.subagentType ?? MAIN_AGENT_LABEL;
+}
+
+function sortKey(group: GroupKey): (a: AggregatedRow, b: AggregatedRow) => number {
+	// For day groupings users want chronological; otherwise descend by cost.
+	if (group === 'day') return (a, b) => (a.subagent < b.subagent ? -1 : a.subagent > b.subagent ? 1 : 0);
+	return (a, b) => b.cost.totalCost - a.cost.totalCost;
+}
+
 export async function aggregate(
 	turns: AsyncIterable<SessionTurn>,
 	from: Date,
 	to: Date,
+	group: GroupKey = 'subagent',
 ): Promise<LedgerReport> {
-	const rowsByAgent = new Map<string, AggregatedRow>();
-	const sessionsByAgent = new Map<string, Set<string>>();
+	const rowsByKey = new Map<string, AggregatedRow>();
+	const sessionsByKey = new Map<string, Set<string>>();
 
 	for await (const turn of turns) {
 		if (turn.type !== 'assistant' || !turn.usage) continue;
 
-		const agent = turn.subagentType ?? MAIN_AGENT_LABEL;
-		const row = rowsByAgent.get(agent) ?? emptyRow(agent);
+		const key = keyOf(turn, group);
+		const row = rowsByKey.get(key) ?? emptyRow(key);
 
 		const cost = costFor(turn.usage, turn.model);
 		const { fiveMin, oneHour } = splitCache(turn);
@@ -57,25 +76,28 @@ export async function aggregate(
 		row.cacheCreation5mTokens += fiveMin;
 		row.cacheCreation1hTokens += oneHour;
 		row.cacheReadTokens += turn.usage.cache_read_input_tokens ?? 0;
+		row.webSearchRequests += turn.usage.server_tool_use?.web_search_requests ?? 0;
+		row.webFetchRequests += turn.usage.server_tool_use?.web_fetch_requests ?? 0;
 		row.cost.inputCost += cost.inputCost;
 		row.cost.outputCost += cost.outputCost;
 		row.cost.cacheCreation5mCost += cost.cacheCreation5mCost;
 		row.cost.cacheCreation1hCost += cost.cacheCreation1hCost;
 		row.cost.cacheReadCost += cost.cacheReadCost;
+		row.cost.serverToolUseCost += cost.serverToolUseCost;
 		row.cost.totalCost += cost.totalCost;
 
-		const sessions = sessionsByAgent.get(agent) ?? new Set<string>();
+		const sessions = sessionsByKey.get(key) ?? new Set<string>();
 		sessions.add(turn.sessionId);
-		sessionsByAgent.set(agent, sessions);
+		sessionsByKey.set(key, sessions);
 
-		rowsByAgent.set(agent, row);
+		rowsByKey.set(key, row);
 	}
 
-	for (const [agent, row] of rowsByAgent) {
-		row.sessionCount = sessionsByAgent.get(agent)?.size ?? 0;
+	for (const [key, row] of rowsByKey) {
+		row.sessionCount = sessionsByKey.get(key)?.size ?? 0;
 	}
 
-	const rows = [...rowsByAgent.values()].sort((a, b) => b.cost.totalCost - a.cost.totalCost);
+	const rows = [...rowsByKey.values()].sort(sortKey(group));
 	const total = rows.reduce<AggregatedRow>((acc, row) => {
 		acc.sessionCount += row.sessionCount;
 		acc.inputTokens += row.inputTokens;
@@ -83,11 +105,14 @@ export async function aggregate(
 		acc.cacheCreation5mTokens += row.cacheCreation5mTokens;
 		acc.cacheCreation1hTokens += row.cacheCreation1hTokens;
 		acc.cacheReadTokens += row.cacheReadTokens;
+		acc.webSearchRequests += row.webSearchRequests;
+		acc.webFetchRequests += row.webFetchRequests;
 		acc.cost.inputCost += row.cost.inputCost;
 		acc.cost.outputCost += row.cost.outputCost;
 		acc.cost.cacheCreation5mCost += row.cost.cacheCreation5mCost;
 		acc.cost.cacheCreation1hCost += row.cost.cacheCreation1hCost;
 		acc.cost.cacheReadCost += row.cost.cacheReadCost;
+		acc.cost.serverToolUseCost += row.cost.serverToolUseCost;
 		acc.cost.totalCost += row.cost.totalCost;
 		return acc;
 	}, emptyRow('total'));

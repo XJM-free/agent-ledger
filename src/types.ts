@@ -11,6 +11,11 @@ export interface CacheCreationDetail {
 	ephemeral_1h_input_tokens?: number;
 }
 
+export interface ServerToolUse {
+	web_search_requests?: number;
+	web_fetch_requests?: number;
+}
+
 export interface TokenUsage {
 	input_tokens: number;
 	output_tokens: number;
@@ -19,6 +24,8 @@ export interface TokenUsage {
 	cache_creation_input_tokens?: number;
 	cache_read_input_tokens?: number;
 	cache_creation?: CacheCreationDetail;
+	// Anthropic server-side tool use (web_search, web_fetch). Priced per request, not per token.
+	server_tool_use?: ServerToolUse;
 }
 
 export interface SessionTurn {
@@ -37,6 +44,7 @@ export interface CostBreakdown {
 	cacheCreation5mCost: number;
 	cacheCreation1hCost: number;
 	cacheReadCost: number;
+	serverToolUseCost: number;
 	totalCost: number;
 }
 
@@ -48,6 +56,8 @@ export interface AggregatedRow {
 	cacheCreation5mTokens: number;
 	cacheCreation1hTokens: number;
 	cacheReadTokens: number;
+	webSearchRequests: number;
+	webFetchRequests: number;
 	cost: CostBreakdown;
 }
 
