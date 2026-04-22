@@ -27,15 +27,49 @@ If you run **seven** subagents daily (reliability, release, review, iOS factory,
 npm install -g claude-agent-ledger
 # or: bun install -g claude-agent-ledger
 
-agent-ledger today                 # today's spend, by subagent
-agent-ledger week --by model       # last 7 days, by Claude model
-agent-ledger week --by day         # daily bar chart
+agent-ledger week --summary        # the dashboard (start here)
+agent-ledger week --by model       # which Claude model burned the budget
+agent-ledger week --by day         # daily bar chart with peak/avg/variance
 agent-ledger month --md > report.md
 ```
 
 No server. No account. No data leaves your machine.
 
-## Example output (real)
+## Why this and not `/cost`?
+
+Claude Code's built-in `/cost` shows the **current session** cost. That's it.
+
+`claude-agent-ledger` answers questions `/cost` can't:
+
+- Which of my **10+ subagents** burned the budget? (`--by model` / default)
+- Which **day** of last week was the expensive one? (`--by day`)
+- What would my Claude Max usage have cost on **pay-as-you-go**? (the "shadow cost" framing)
+- Is my **cache reuse ratio** healthy? (auto-derived insight)
+- What's the **leverage** I'm getting from my $200/mo subscription? (e.g. 250×)
+
+Run `agent-ledger week --summary` once and decide.
+
+## Example output (real, from the author's machine)
+
+### `--summary` (the dashboard)
+
+```
+agent-ledger week summary  2026-04-15 → 2026-04-22
+
+  Shadow cost           $13,356.27
+  Sessions              217
+  Plan reference        $200/mo (Max)
+  Multiplier            250× vs Max plan
+
+  Top subagent          (main)            $12,701.19 (95%)
+  Top model             claude-opus-4-7   $7,184.45 (54%)
+  Peak day              2026-04-15        $3,679.80
+
+  Cache 1h writes       119.45M tokens · $3583.42
+  Cache reads           5.54B tokens · $8162.93
+  Cache reuse           38× reads/writes
+  Server tools          none
+```
 
 ### Default — by subagent
 

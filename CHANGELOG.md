@@ -5,6 +5,27 @@ All notable changes to `claude-agent-ledger` will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-04-22
+
+### Added
+- `--summary` flag — single-screen dashboard with shadow cost, top subagent /
+  model / day, cache reuse ratio, and **leverage vs $200/mo Max plan**.
+  This is the killer view for "why install over /cost?"
+- Auto-derived insights footer on the default table:
+  - Top contributor with %
+  - 1h cache spend call-out (when ≥5% of total)
+  - Cache reuse ratio (read/write) with verdict
+  - Monthly $ equivalent + leverage vs Max plan
+- Daily-mode insights: peak day, avg/day, peak/trough variance
+
+### Changed
+- `--by day` polish:
+  - Bar fixed to 40-char width so session counts align in their own column
+  - Brighter cyan (`\x1b[96m`) bar character
+  - Total row separated by horizontal rule, properly aligned
+- Header line now shows period + total + sessions + group count at a glance:
+  `agent-ledger week  2026-04-15 → 2026-04-22  ·  $13,356.27 shadow  ·  217 sessions  ·  7 agents`
+
 ## [0.2.0] — 2026-04-21
 
 ### Added

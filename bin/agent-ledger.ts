@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { aggregate, type GroupKey } from '../src/aggregator.ts';
-import { formatMarkdown, formatTable, formatTrend } from '../src/format.ts';
+import { formatMarkdown, formatSummary, formatTable, formatTrend } from '../src/format.ts';
 import { parseAll } from '../src/parser.ts';
-import type { LedgerReport } from '../src/types.ts';
+import type { LedgerReport, SessionTurn } from '../src/types.ts';
 
 type Period = 'today' | 'week' | 'month';
 type Plan = 'payg' | 'pro' | 'max';
@@ -13,6 +13,7 @@ interface Args {
 	json: boolean;
 	plan: Plan;
 	by: GroupKey;
+	summary: boolean;
 }
 
 function periodRange(period: Period): { from: Date; to: Date } {
@@ -34,24 +35,24 @@ function usage(): never {
 	console.error(`Usage: agent-ledger <today|week|month> [flags]
 
 Flags:
-  --by <subagent|model|day>   Group rows by subagent (default), model, or day.
-                              "day" renders as a daily trend bar chart.
-  --md                        Emit Markdown table (good for sharing / commits)
-  --json                      Emit raw JSON (for piping into other tools)
+  --summary                   One-screen dashboard: total + top subagent + top
+                              model + peak day + cache reuse + leverage vs $200/mo plan
+  --by <subagent|model|day>   Group rows by subagent (default), model, or day
+                              "day" renders as a daily ASCII bar chart
+  --md                        Markdown table output (good for sharing / commits)
+  --json                      Raw JSON output (for piping into jq)
   --plan pro|max              Suppress dollar columns (token utilization only)
-                              Default is pay-as-you-go: shows shadow cost in $.
 
 Environment:
   NO_COLOR=1                  Disable ANSI colors
-  FORCE_COLOR=1               Force colors even when piping
+  FORCE_COLOR=1               Force colors when piping
 
 Examples:
-  agent-ledger today
-  agent-ledger week --by model
+  agent-ledger week --summary           # the dashboard
   agent-ledger week --by day            # daily bar chart
-  agent-ledger week --md > week.md
-  agent-ledger month --json | jq '.total.cost.totalCost'
-  agent-ledger week --plan max
+  agent-ledger week --by model          # which Claude model burned the budget
+  agent-ledger month --md > month.md
+  agent-ledger week --json | jq '.total.cost.totalCost'
 `);
 	process.exit(1);
 }
@@ -88,6 +89,7 @@ function parseArgs(argv: string[]): Args {
 		json: rest.includes('--json'),
 		plan,
 		by,
+		summary: rest.includes('--summary'),
 	};
 }
 
@@ -109,10 +111,33 @@ function planMask(report: LedgerReport, plan: Plan): LedgerReport {
 	};
 }
 
+// Materialize once so --summary can re-aggregate by 3 dimensions cheaply.
+async function collectTurns(opts: { from: Date; to: Date }): Promise<SessionTurn[]> {
+	const out: SessionTurn[] = [];
+	for await (const t of parseAll(opts)) out.push(t);
+	return out;
+}
+
+async function* iterTurns(turns: SessionTurn[]): AsyncGenerator<SessionTurn> {
+	for (const t of turns) yield t;
+}
+
 async function main(): Promise<void> {
 	const args = parseArgs(process.argv.slice(2));
 	const { from, to } = periodRange(args.period);
-	let report = await aggregate(parseAll({ from, to }), from, to, args.by);
+	const turns = await collectTurns({ from, to });
+
+	if (args.summary) {
+		const [bySub, byMod, byDay] = await Promise.all([
+			aggregate(iterTurns(turns), from, to, 'subagent'),
+			aggregate(iterTurns(turns), from, to, 'model'),
+			aggregate(iterTurns(turns), from, to, 'day'),
+		]);
+		console.log(formatSummary(bySub, byMod, byDay, args.period));
+		return;
+	}
+
+	let report = await aggregate(iterTurns(turns), from, to, args.by);
 	report = planMask(report, args.plan);
 
 	let output: string;
