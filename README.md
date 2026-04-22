@@ -5,6 +5,9 @@
 [![npm](https://img.shields.io/npm/v/claude-agent-ledger.svg)](https://www.npmjs.com/package/claude-agent-ledger)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
+> *Even I needed `--anonymize` before posting my own data publicly.
+> That's why the flag exists. Use it before you screenshot.*
+
 ---
 
 ## Why
