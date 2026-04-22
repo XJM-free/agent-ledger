@@ -14,6 +14,7 @@ interface Args {
 	plan: Plan;
 	by: GroupKey;
 	summary: boolean;
+	anonymize: boolean;
 }
 
 function periodRange(period: Period): { from: Date; to: Date } {
@@ -47,6 +48,9 @@ Flags:
   --md                        Markdown table output (good for sharing / commits)
   --json                      Raw JSON output (for piping into jq)
   --plan pro|max              Suppress dollar columns (token utilization only)
+  --anonymize                 Replace project paths and session ids with safe
+                              placeholders (~/repo-A, sess-A) so the output is
+                              shareable without doxing yourself.
 
 Environment:
   NO_COLOR=1                  Disable ANSI colors
@@ -101,7 +105,29 @@ function parseArgs(argv: string[]): Args {
 		plan,
 		by,
 		summary: rest.includes('--summary'),
+		anonymize: rest.includes('--anonymize'),
 	};
+}
+
+// Replace identifying labels with safe placeholders. Run after aggregation,
+// before formatting. We anonymize project paths (which leak employer + repo
+// names) and session ids; leave subagent / model / day untouched (those are
+// either public Anthropic info or generic agent type names).
+function anonymizeReport(report: LedgerReport, group: GroupKey): LedgerReport {
+	if (group !== 'project' && group !== 'session') return report;
+	const prefix = group === 'project' ? '~/repo-' : 'sess-';
+	const labelFor = (i: number): string => {
+		// Use A..Z then AA..ZZ for many entries
+		if (i < 26) return prefix + String.fromCharCode(65 + i);
+		return prefix + String.fromCharCode(65 + Math.floor(i / 26) - 1) + String.fromCharCode(65 + (i % 26));
+	};
+	const newRows = report.rows.map((r, i) => ({ ...r, subagent: labelFor(i) }));
+	return { ...report, rows: newRows };
+}
+
+// For --summary we may need to anonymize multiple sub-reports.
+function anonymizeForSummary(byProject: LedgerReport): LedgerReport {
+	return anonymizeReport(byProject, 'project');
 }
 
 function planMask(report: LedgerReport, plan: Plan): LedgerReport {
@@ -139,17 +165,19 @@ async function main(): Promise<void> {
 	const turns = await collectTurns({ from, to });
 
 	if (args.summary) {
-		const [bySub, byMod, byDay, byProj] = await Promise.all([
+		const [bySub, byMod, byDay, byProjRaw] = await Promise.all([
 			aggregate(iterTurns(turns), from, to, 'subagent'),
 			aggregate(iterTurns(turns), from, to, 'model'),
 			aggregate(iterTurns(turns), from, to, 'day'),
 			aggregate(iterTurns(turns), from, to, 'project'),
 		]);
+		const byProj = args.anonymize ? anonymizeForSummary(byProjRaw) : byProjRaw;
 		console.log(formatSummary(bySub, byMod, byDay, byProj, args.period));
 		return;
 	}
 
 	let report = await aggregate(iterTurns(turns), from, to, args.by);
+	if (args.anonymize) report = anonymizeReport(report, args.by);
 	report = planMask(report, args.plan);
 
 	let output: string;

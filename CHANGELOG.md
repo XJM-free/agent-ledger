@@ -5,6 +5,15 @@ All notable changes to `claude-agent-ledger` will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-04-22
+
+### Added
+- `--anonymize` flag — replaces project paths with `~/repo-A`, `~/repo-B`,
+  ... and session ids with `sess-A`, `sess-B`, ... ordered by spend descending.
+  Use this when you want to share your output publicly (HN / Bluesky /
+  presentation) without leaking employer names or internal repo names.
+  Subagent / model / day labels stay untouched (those are public info).
+
 ## [0.4.0] — 2026-04-22
 
 ### Added

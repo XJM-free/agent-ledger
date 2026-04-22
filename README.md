@@ -180,6 +180,7 @@ If Anthropic's actual rate differs (or web_fetch has its own price), open an iss
 |---|---|
 | `--summary` | One-screen dashboard with all the headline numbers |
 | `--by <subagent\|model\|day\|project\|session>` | Group rows. Default: `subagent`. `day` renders as ASCII bar chart. |
+| `--anonymize` | Replace project paths and session ids with `~/repo-A`, `sess-A`, ... so you can share screenshots without doxing your employer / private repos. |
 | `--md` | Markdown table output (good for committing or sharing) |
 | `--json` | Raw JSON output (pipe into jq) |
 | `--plan pro\|max` | Hide dollar columns; show token utilization only |
