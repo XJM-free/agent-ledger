@@ -31,10 +31,14 @@ npm install -g claude-agent-ledger
 # or: bun install -g claude-agent-ledger
 
 agent-ledger week --summary        # the dashboard (start here)
-agent-ledger week --by model       # which Claude model burned the budget
+agent-ledger week --tree           # subagent fan-out tree (the MOAT view) — new in 0.5
+agent-ledger week --by tool        # which tool ate the budget (Read/Bash/Grep/MCP) — new in 0.5
+agent-ledger week --by model       # opus vs sonnet vs haiku
 agent-ledger week --by project     # which project ate your tokens
 agent-ledger week --by session     # which single sessions went sideways
 agent-ledger week --by day         # daily bar chart with peak/avg/variance
+agent-ledger today --budget 50     # CI gate: exit 2 if today > $50 — new in 0.5
+agent-ledger week --json | jq      # JSON output for ANY view incl. summary — new in 0.5
 agent-ledger month --md > report.md
 ```
 

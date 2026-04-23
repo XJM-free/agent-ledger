@@ -5,6 +5,46 @@ All notable changes to `claude-agent-ledger` will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-04-23
+
+### Added — performance + production-readiness foundation
+
+- **Streaming JSONL parser** — replaces `await file.text()` (which OOM'd on
+  10GB+ logs). Now reads via `Bun.file().stream()` + `TextDecoder` line-by-line.
+  Memory profile is constant regardless of log size.
+- **Concurrent file walk** — `findSessionLogs` parallelizes per-project
+  `readdir` (`Promise.all`), and `parseAll` reads up to 8 JSONL files
+  concurrently. ~5–10× cold-start speedup on multi-project setups.
+- **Zero materialization** — bin no longer collects every turn into an array
+  before aggregating. Instead one parser stream fans out to N `Aggregator`
+  instances in parallel. Memory is now O(unique-keys) not O(turns).
+- **`--by tool`** — new GroupKey. Attribute spend per tool call (`Read`,
+  `Bash`, `Grep`, `Write`, MCP tool names). Answers "which tool is eating my
+  budget" — the most actionable lens for a Claude Code user.
+- **`--tree` (the MOAT)** — subagent-graph cost attribution. Walks the
+  parent→child orchestration tree and shows
+  `orchestrator → 3×researcher + 6×swift-dev = $312`. Helicone / Langfuse /
+  OpenLLMetry can't do this — they observe API calls, not Claude Code's
+  multi-agent runtime.
+- **`--budget <USD>`** — exit code `2` if total cost exceeds budget. Wire it
+  into your CI / shell startup / `pre-commit` to gate spend.
+- **`--json` works for `--summary`** — previously summary was text-only.
+  Now pipe-friendly: `agent-ledger week --summary --json | jq`.
+- **`--verbose`** — print parse stats (turns / elapsed) to stderr.
+
+### Changed
+
+- `Aggregator` is now a class (`add()` / `finalize()`) instead of an async
+  function. Enables single-pass fan-out and live-tail in v0.6.
+- `parseAll` and `parseFile` no longer block on full file reads.
+- `SessionTurn` adds `parentSessionId` and `toolUses[]` fields.
+
+### Internal
+
+- Backwards-compatible: the old `aggregate(turns, from, to, group)` async
+  function still exists and wraps the new `Aggregator` class. All v0.4.x
+  tests pass without modification (22/22).
+
 ## [0.4.1] — 2026-04-22
 
 ### Added

@@ -5,6 +5,9 @@ import type { SessionTurn, TokenUsage } from './types.ts';
 
 const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
+// Limit concurrent file reads so we don't exhaust fd on huge setups.
+const CONCURRENCY = 8;
+
 export interface ParseOptions {
 	from?: Date;
 	to?: Date;
@@ -15,16 +18,9 @@ interface LogFile {
 	path: string;
 	projectId: string;
 	subagentType: string | undefined;
+	parentSessionId?: string | undefined; // for subagent logs, the parent session
 }
 
-// Walk the projects directory and yield every JSONL log.
-// Real Claude Code layout (as of 2026-04):
-//   ~/.claude/projects/<encoded-project>/<session-uuid>.jsonl             (main session)
-//   ~/.claude/projects/<encoded-project>/<session-uuid>/subagents/agent-<hash>.jsonl  (subagent)
-//   ~/.claude/projects/<encoded-project>/<session-uuid>/subagents/agent-<hash>.meta.json
-//
-// The .meta.json next to each subagent .jsonl carries { "agentType": "...", "description": "..." }.
-// We read it to attribute the subagent by its real name (e.g. "Reality Checker") rather than an opaque hash.
 export async function* findSessionLogs(
 	projectsDir: string = CLAUDE_PROJECTS_DIR,
 ): AsyncGenerator<LogFile> {
@@ -34,9 +30,20 @@ export async function* findSessionLogs(
 	} catch {
 		return;
 	}
-	for (const project of projects) {
-		yield* walkForJsonl(join(projectsDir, project), project);
+	// Parallelize the project-level walks; collect LogFiles via streaming queue.
+	const walkers = projects.map((project) =>
+		collectWalk(join(projectsDir, project), project),
+	);
+	const settled = await Promise.all(walkers);
+	for (const list of settled) {
+		for (const lf of list) yield lf;
 	}
+}
+
+async function collectWalk(dir: string, projectId: string): Promise<LogFile[]> {
+	const out: LogFile[] = [];
+	for await (const lf of walkForJsonl(dir, projectId)) out.push(lf);
+	return out;
 }
 
 async function* walkForJsonl(dir: string, projectId: string): AsyncGenerator<LogFile> {
@@ -46,6 +53,9 @@ async function* walkForJsonl(dir: string, projectId: string): AsyncGenerator<Log
 	} catch {
 		return;
 	}
+	// If this directory IS named 'subagents', its parent session is one level up.
+	// e.g. .../<session-uuid>/subagents/agent-XXX.jsonl → parent = <session-uuid>
+	const parentSession = basename(dir) === 'subagents' ? basename(dirname(dir)) : undefined;
 	for (const name of entries) {
 		if (name.startsWith('.') || name === 'memory') continue;
 		const full = join(dir, name);
@@ -60,13 +70,18 @@ async function* walkForJsonl(dir: string, projectId: string): AsyncGenerator<Log
 			continue;
 		}
 		if (name.endsWith('.jsonl')) {
-			yield { path: full, projectId, subagentType: await resolveSubagentType(full) };
+			const subagentType = await resolveSubagentType(full);
+			yield {
+				path: full,
+				projectId,
+				subagentType,
+				parentSessionId: parentSession,
+			};
 		}
 	}
 }
 
 async function resolveSubagentType(jsonlPath: string): Promise<string | undefined> {
-	// Subagent logs live under `.../subagents/agent-<hash>.jsonl` with a sibling `.meta.json`.
 	if (basename(dirname(jsonlPath)) !== 'subagents') return undefined;
 	const metaPath = jsonlPath.replace(/\.jsonl$/, '.meta.json');
 	try {
@@ -78,26 +93,51 @@ async function resolveSubagentType(jsonlPath: string): Promise<string | undefine
 	}
 }
 
-// Stream-parse one JSONL file. Skips malformed lines rather than aborting.
+// Streaming line reader — does NOT buffer the whole file.
+// Handles partial lines across chunk boundaries. Skips malformed JSON.
 export async function* parseFile(
 	path: string,
 	subagentType?: string,
 	projectId?: string,
+	parentSessionId?: string,
 ): AsyncGenerator<SessionTurn> {
-	const file = Bun.file(path);
-	const text = await file.text();
 	const sessionId = basename(path).replace('.jsonl', '');
-
-	for (const line of text.split('\n')) {
-		if (!line.trim()) continue;
-		let obj: Record<string, unknown>;
-		try {
-			obj = JSON.parse(line);
-		} catch {
-			continue;
+	const stream = Bun.file(path).stream();
+	const decoder = new TextDecoder('utf-8', { fatal: false });
+	let buffer = '';
+	for await (const chunk of stream) {
+		buffer += decoder.decode(chunk, { stream: true });
+		let nl: number;
+		while ((nl = buffer.indexOf('\n')) !== -1) {
+			const line = buffer.slice(0, nl);
+			buffer = buffer.slice(nl + 1);
+			if (!line.trim()) continue;
+			const turn = tryParseLine(line, sessionId, subagentType, projectId, parentSessionId);
+			if (turn) yield turn;
 		}
-		yield extractTurn(obj, sessionId, subagentType, projectId);
 	}
+	// Flush any trailing partial line.
+	buffer += decoder.decode();
+	if (buffer.trim()) {
+		const turn = tryParseLine(buffer, sessionId, subagentType, projectId, parentSessionId);
+		if (turn) yield turn;
+	}
+}
+
+function tryParseLine(
+	line: string,
+	sessionId: string,
+	subagentType: string | undefined,
+	projectId: string | undefined,
+	parentSessionId: string | undefined,
+): SessionTurn | undefined {
+	let obj: Record<string, unknown>;
+	try {
+		obj = JSON.parse(line);
+	} catch {
+		return undefined;
+	}
+	return extractTurn(obj, sessionId, subagentType, projectId, parentSessionId);
 }
 
 function extractTurn(
@@ -105,14 +145,29 @@ function extractTurn(
 	sessionId: string,
 	subagentType: string | undefined,
 	projectId: string | undefined,
+	parentSessionId: string | undefined,
 ): SessionTurn {
 	const msg = (obj.message ?? {}) as Record<string, unknown>;
 	const usage = (msg.usage ?? undefined) as TokenUsage | undefined;
 	const model = (msg.model ?? undefined) as string | undefined;
-	// If the raw turn carries its own subagentType (our fixture format), prefer it;
-	// otherwise fall back to the directory-derived one.
 	const perTurnSubagent = ((obj.subagentType as string) ?? undefined) || undefined;
 	const perTurnProject = ((obj.projectId as string) ?? undefined) || undefined;
+	const perTurnParent = ((obj.parentSessionId as string) ?? undefined) || undefined;
+
+	// Extract tool_use blocks from the assistant message content (if any).
+	// Used by the --by tool aggregator and subagent-graph attribution.
+	const toolUses: string[] = [];
+	const content = msg.content;
+	if (Array.isArray(content)) {
+		for (const block of content) {
+			if (block && typeof block === 'object') {
+				const b = block as Record<string, unknown>;
+				if (b.type === 'tool_use' && typeof b.name === 'string') {
+					toolUses.push(b.name);
+				}
+			}
+		}
+	}
 
 	return {
 		type: ((obj.type as string) ?? 'assistant') as SessionTurn['type'],
@@ -120,20 +175,43 @@ function extractTurn(
 		sessionId,
 		projectId: perTurnProject ?? projectId,
 		subagentType: perTurnSubagent ?? subagentType,
+		parentSessionId: perTurnParent ?? parentSessionId,
 		model,
 		usage,
+		toolUses: toolUses.length > 0 ? toolUses : undefined,
 		raw: obj,
 	};
 }
 
-// Convenience: stream every turn across every log under ~/.claude/projects.
+// Parallelized, streaming. Does not materialize all turns — caller iterates
+// once and dispatches to aggregators. Reads up to CONCURRENCY files at a time.
 export async function* parseAll(opts: ParseOptions = {}): AsyncGenerator<SessionTurn> {
 	const dir = opts.projectsDir ?? CLAUDE_PROJECTS_DIR;
-	for await (const file of findSessionLogs(dir)) {
-		for await (const turn of parseFile(file.path, file.subagentType, file.projectId)) {
-			if (opts.from && new Date(turn.timestamp) < opts.from) continue;
-			if (opts.to && new Date(turn.timestamp) > opts.to) continue;
-			yield turn;
+	const files: LogFile[] = [];
+	for await (const f of findSessionLogs(dir)) files.push(f);
+
+	// Fan out file reads in batches of CONCURRENCY, yield turns in arrival order.
+	for (let i = 0; i < files.length; i += CONCURRENCY) {
+		const batch = files.slice(i, i + CONCURRENCY);
+		const streams = batch.map((f) =>
+			collectBatch(parseFile(f.path, f.subagentType, f.projectId, f.parentSessionId), opts),
+		);
+		const results = await Promise.all(streams);
+		for (const turns of results) {
+			for (const t of turns) yield t;
 		}
 	}
+}
+
+async function collectBatch(
+	gen: AsyncGenerator<SessionTurn>,
+	opts: ParseOptions,
+): Promise<SessionTurn[]> {
+	const out: SessionTurn[] = [];
+	for await (const t of gen) {
+		if (opts.from && new Date(t.timestamp) < opts.from) continue;
+		if (opts.to && new Date(t.timestamp) > opts.to) continue;
+		out.push(t);
+	}
+	return out;
 }

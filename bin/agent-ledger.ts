@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
-import { aggregate, type GroupKey } from '../src/aggregator.ts';
+import { Aggregator, type GroupKey, SubagentGraph } from '../src/aggregator.ts';
 import { formatMarkdown, formatSummary, formatTable, formatTrend } from '../src/format.ts';
 import { parseAll } from '../src/parser.ts';
-import type { LedgerReport, SessionTurn } from '../src/types.ts';
+import { formatTree, formatTreeMarkdown } from '../src/tree.ts';
+import type { LedgerReport } from '../src/types.ts';
 
 type Period = 'today' | 'week' | 'month';
 type Plan = 'payg' | 'pro' | 'max';
@@ -14,7 +15,10 @@ interface Args {
 	plan: Plan;
 	by: GroupKey;
 	summary: boolean;
+	tree: boolean;
 	anonymize: boolean;
+	budget?: number; // USD threshold; non-zero exit if exceeded
+	verbose: boolean;
 }
 
 function periodRange(period: Period): { from: Date; to: Date } {
@@ -36,32 +40,34 @@ function usage(): never {
 	console.error(`Usage: agent-ledger <today|week|month> [flags]
 
 Flags:
-  --summary                   One-screen dashboard: total + top subagent + top
-                              model + peak day + cache reuse + leverage vs $200/mo plan
-  --by <subagent|model|day|project|session>
+  --summary                   One-screen dashboard (start here).
+  --by <subagent|model|day|project|session|tool>
                               Group rows by:
                                 subagent  (default) — agent attribution
                                 model     — opus vs sonnet vs haiku
                                 day       — daily ASCII bar chart
                                 project   — by Claude Code project (decoded path)
                                 session   — by session id (top spenders)
+                                tool      — by Read/Bash/Write/Grep — what your turns burn on
+  --tree                      Subagent graph: parent→child cost attribution.
+                              The MOAT view: orchestrator → 3×researcher + 6×swift-dev = $312.
+  --budget <USD>              Exit non-zero (code 2) if total cost > USD. Pipe-friendly.
   --md                        Markdown table output (good for sharing / commits)
-  --json                      Raw JSON output (for piping into jq)
+  --json                      Raw JSON output (also works with --summary now)
   --plan pro|max              Suppress dollar columns (token utilization only)
-  --anonymize                 Replace project paths and session ids with safe
-                              placeholders (~/repo-A, sess-A) so the output is
-                              shareable without doxing yourself.
+  --anonymize                 Replace project paths and session ids with safe placeholders.
+  --verbose                   Print parse stats (files, turns, elapsed) to stderr.
 
 Environment:
   NO_COLOR=1                  Disable ANSI colors
   FORCE_COLOR=1               Force colors when piping
 
 Examples:
-  agent-ledger week --summary           # the dashboard
-  agent-ledger week --by day            # daily bar chart
-  agent-ledger week --by model          # which Claude model burned the budget
-  agent-ledger month --md > month.md
+  agent-ledger week --summary               # the dashboard
+  agent-ledger week --tree                  # subagent fan-out tree
+  agent-ledger week --by tool               # which Claude tool ate the budget
   agent-ledger week --json | jq '.total.cost.totalCost'
+  agent-ledger today --budget 50            # CI gate: fail if today > $50
 `);
 	process.exit(1);
 }
@@ -72,6 +78,7 @@ function parseArgs(argv: string[]): Args {
 
 	let plan: Plan = 'payg';
 	let by: GroupKey = 'subagent';
+	let budget: number | undefined;
 	for (let i = 0; i < rest.length; i++) {
 		const flag = rest[i];
 		if (flag === '--plan') {
@@ -89,13 +96,24 @@ function parseArgs(argv: string[]): Args {
 				next === 'model' ||
 				next === 'day' ||
 				next === 'project' ||
-				next === 'session'
+				next === 'session' ||
+				next === 'tool'
 			) {
 				by = next;
 				i++;
 			} else {
+				console.error(`agent-ledger: unknown --by value '${next}'`);
 				usage();
 			}
+		} else if (flag === '--budget') {
+			const next = rest[i + 1];
+			const n = Number(next);
+			if (!Number.isFinite(n) || n <= 0) {
+				console.error(`agent-ledger: --budget requires a positive number (got '${next}')`);
+				usage();
+			}
+			budget = n;
+			i++;
 		}
 	}
 	return {
@@ -105,29 +123,22 @@ function parseArgs(argv: string[]): Args {
 		plan,
 		by,
 		summary: rest.includes('--summary'),
+		tree: rest.includes('--tree'),
 		anonymize: rest.includes('--anonymize'),
+		budget,
+		verbose: rest.includes('--verbose'),
 	};
 }
 
-// Replace identifying labels with safe placeholders. Run after aggregation,
-// before formatting. We anonymize project paths (which leak employer + repo
-// names) and session ids; leave subagent / model / day untouched (those are
-// either public Anthropic info or generic agent type names).
 function anonymizeReport(report: LedgerReport, group: GroupKey): LedgerReport {
 	if (group !== 'project' && group !== 'session') return report;
 	const prefix = group === 'project' ? '~/repo-' : 'sess-';
 	const labelFor = (i: number): string => {
-		// Use A..Z then AA..ZZ for many entries
 		if (i < 26) return prefix + String.fromCharCode(65 + i);
 		return prefix + String.fromCharCode(65 + Math.floor(i / 26) - 1) + String.fromCharCode(65 + (i % 26));
 	};
 	const newRows = report.rows.map((r, i) => ({ ...r, subagent: labelFor(i) }));
 	return { ...report, rows: newRows };
-}
-
-// For --summary we may need to anonymize multiple sub-reports.
-function anonymizeForSummary(byProject: LedgerReport): LedgerReport {
-	return anonymizeReport(byProject, 'project');
 }
 
 function planMask(report: LedgerReport, plan: Plan): LedgerReport {
@@ -148,49 +159,91 @@ function planMask(report: LedgerReport, plan: Plan): LedgerReport {
 	};
 }
 
-// Materialize once so --summary can re-aggregate by 3 dimensions cheaply.
-async function collectTurns(opts: { from: Date; to: Date }): Promise<SessionTurn[]> {
-	const out: SessionTurn[] = [];
-	for await (const t of parseAll(opts)) out.push(t);
-	return out;
-}
-
-async function* iterTurns(turns: SessionTurn[]): AsyncGenerator<SessionTurn> {
-	for (const t of turns) yield t;
-}
-
 async function main(): Promise<void> {
 	const args = parseArgs(process.argv.slice(2));
 	const { from, to } = periodRange(args.period);
-	const turns = await collectTurns({ from, to });
+	const t0 = Date.now();
 
-	if (args.summary) {
-		const [bySub, byMod, byDay, byProjRaw] = await Promise.all([
-			aggregate(iterTurns(turns), from, to, 'subagent'),
-			aggregate(iterTurns(turns), from, to, 'model'),
-			aggregate(iterTurns(turns), from, to, 'day'),
-			aggregate(iterTurns(turns), from, to, 'project'),
-		]);
-		const byProj = args.anonymize ? anonymizeForSummary(byProjRaw) : byProjRaw;
-		console.log(formatSummary(bySub, byMod, byDay, byProj, args.period));
-		return;
+	// Determine which aggregators we need based on flags.
+	// Single parser pass dispatches to all in parallel — no buffering.
+	const aggBySub = new Aggregator('subagent', from, to);
+	const aggByMod = args.summary ? new Aggregator('model', from, to) : undefined;
+	const aggByDay = args.summary ? new Aggregator('day', from, to) : undefined;
+	const aggByProj = args.summary ? new Aggregator('project', from, to) : undefined;
+	const aggUser = !args.summary && !args.tree ? new Aggregator(args.by, from, to) : undefined;
+	const graph = args.tree ? new SubagentGraph() : undefined;
+
+	let turnCount = 0;
+	for await (const turn of parseAll({ from, to })) {
+		turnCount++;
+		aggBySub.add(turn);
+		aggByMod?.add(turn);
+		aggByDay?.add(turn);
+		aggByProj?.add(turn);
+		aggUser?.add(turn);
+		graph?.add(turn);
 	}
 
-	let report = await aggregate(iterTurns(turns), from, to, args.by);
-	if (args.anonymize) report = anonymizeReport(report, args.by);
-	report = planMask(report, args.plan);
+	if (args.verbose) {
+		const elapsed = Date.now() - t0;
+		console.error(
+			`agent-ledger: parsed ${turnCount} turns from ~/.claude/projects in ${elapsed}ms`,
+		);
+	}
 
-	let output: string;
-	if (args.json) {
-		output = JSON.stringify(report, null, 2);
-	} else if (args.markdown) {
-		output = formatMarkdown(report, args.period);
-	} else if (args.by === 'day') {
-		output = formatTrend(report, args.period);
+	let totalCost = aggBySub.finalize().total.cost.totalCost;
+
+	if (args.tree) {
+		const roots = graph!.finalize(20);
+		totalCost = roots.reduce((s, r) => s + r.totalCost, 0);
+		const out =
+			args.json
+				? JSON.stringify({ roots, totalCost }, null, 2)
+				: args.markdown
+					? formatTreeMarkdown(roots, totalCost)
+					: formatTree(roots, totalCost);
+		console.log(out);
+	} else if (args.summary) {
+		const bySubR = aggBySub.finalize();
+		const byModR = aggByMod!.finalize();
+		const byDayR = aggByDay!.finalize();
+		let byProjR = aggByProj!.finalize();
+		if (args.anonymize) byProjR = anonymizeReport(byProjR, 'project');
+		totalCost = bySubR.total.cost.totalCost;
+		if (args.json) {
+			console.log(
+				JSON.stringify(
+					{ subagent: bySubR, model: byModR, day: byDayR, project: byProjR, totalCost },
+					null,
+					2,
+				),
+			);
+		} else {
+			console.log(formatSummary(bySubR, byModR, byDayR, byProjR, args.period));
+		}
 	} else {
-		output = formatTable(report, args.period, args.by);
+		let report = aggUser!.finalize();
+		if (args.anonymize) report = anonymizeReport(report, args.by);
+		report = planMask(report, args.plan);
+		totalCost = report.total.cost.totalCost;
+		const output =
+			args.json
+				? JSON.stringify(report, null, 2)
+				: args.markdown
+					? formatMarkdown(report, args.period)
+					: args.by === 'day'
+						? formatTrend(report, args.period)
+						: formatTable(report, args.period, args.by);
+		console.log(output);
 	}
-	console.log(output);
+
+	// Budget gate — non-zero exit code so this can be a CI/shell hook.
+	if (args.budget !== undefined && totalCost > args.budget) {
+		console.error(
+			`agent-ledger: BUDGET EXCEEDED — total $${totalCost.toFixed(2)} > budget $${args.budget.toFixed(2)}`,
+		);
+		process.exit(2);
+	}
 }
 
 main().catch((err) => {
